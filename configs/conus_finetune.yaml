@@ -1,0 +1,26 @@
+# Configuration for CONUS validation run
+# Purpose: Reproduce Johnson et al. (2025) baseline results
+
+# Data
+data_dir: data/satellite/conus_west/
+labels_csv: data/processed/globe_lfmc_conus_west.csv
+val_fraction: 0.2
+
+# Model
+galileo_weights: data/galileo/models/tiny/
+embed_dim: 256
+hidden_dim: 128
+dropout: 0.1
+freeze_encoder: false
+
+# Training
+learning_rate: 0.0001
+batch_size: 32
+epochs: 100
+patience: 10
+warmup_epochs: 5
+weight_decay: 0.01
+
+# Output
+checkpoint_dir: checkpoints/conus_baseline/
+device: cuda

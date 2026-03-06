@@ -1,0 +1,28 @@
+# Configuration for Maui-specific fine-tuning
+# Start from CONUS baseline, fine-tune for Hawaii
+
+# Data
+data_dir: data/satellite/hawaii/
+labels_csv: data/processed/globe_lfmc_hawaii_state.csv
+val_fraction: 0.2
+
+# Model (start from CONUS checkpoint)
+pretrained_checkpoint: checkpoints/conus_baseline/best_model.pt
+galileo_weights: data/galileo/models/tiny/
+embed_dim: 256
+hidden_dim: 128
+dropout: 0.1
+freeze_encoder: true  # Start frozen, unfreeze later
+
+# Training (lower LR for fine-tuning)
+learning_rate: 0.00005
+batch_size: 16
+epochs: 50
+patience: 15
+warmup_epochs: 3
+weight_decay: 0.01
+unfreeze_after_epoch: 10  # Unfreeze encoder after 10 epochs
+
+# Output
+checkpoint_dir: checkpoints/maui/
+device: cuda

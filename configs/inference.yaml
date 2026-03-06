@@ -1,0 +1,25 @@
+# Configuration for LFMC map generation over Maui County
+
+# Model
+checkpoint_path: checkpoints/maui/best_model.pt
+galileo_weights: data/galileo/models/tiny/
+
+# Map generation
+patch_size: 256
+overlap: 32
+batch_size: 16
+nodata_value: -9999.0
+
+# Study area (Maui County)
+lat_min: 20.5
+lat_max: 21.1
+lon_min: -156.7
+lon_max: -155.9
+crs: EPSG:32604
+
+# Time range for map generation
+years: [2023, 2024, 2025, 2026]
+months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+
+# Output
+output_dir: outputs/maps/
