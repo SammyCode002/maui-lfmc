@@ -1,32 +1,47 @@
 # Core ML
-torch>=2.0.0
-numpy>=1.24.0
-pandas>=2.0.0
-scikit-learn>=1.3.0
+torch>=2.2.1
+torchvision>=0.17.1
+
+# Galileo foundation model - install from source:
+#   git clone --recurse-submodules https://github.com/allenai/lfmc.git
+#   pip install -e allenai-lfmc/submodules/galileo
+#   pip install -e allenai-lfmc
+
+# Data processing
+numpy>=1.26.4
+pandas>=1.5.3
+openpyxl>=3.1.5
+h5py>=3.9.0
+frozendict>=2.4.6
+frozenlist>=1.5.0
 
 # Geospatial
-rasterio>=1.3.0
+rasterio>=1.3.10
 rioxarray>=0.15.0
 geopandas>=0.14.0
 shapely>=2.0.0
+pyproj>=3.6.0
 
-# Satellite data access (choose one or both)
+# Google Earth Engine (primary data source)
+earthengine-api>=0.1.390
+
+# Satellite data (alternative)
 pystac-client>=0.7.0
 planetary-computer>=1.0.0
-# earthengine-api>=0.1.380  # Alternative: Google Earth Engine
+
+# ML utilities
+scikit-learn>=1.4.1
+einops>=0.7.0
+timm>=0.9.0
+tqdm>=4.66.0
 
 # Visualization
 matplotlib>=3.7.0
 
-# Config and utilities
+# Config & utilities
 pyyaml>=6.0
-openpyxl>=3.1.0  # For reading Globe-LFMC Excel files
-tqdm>=4.65.0
-
-# Galileo model dependencies
-einops>=0.6.0
-timm>=0.9.0
+requests>=2.32.0
+python-dotenv>=1.0.0
 
 # Development
-black>=23.0
 pytest>=7.0

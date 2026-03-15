@@ -1,347 +1,410 @@
 """
 LFMC Map Generator for Maui County
 
-Generates wall-to-wall (spatially complete) LFMC maps by:
-1. Downloading satellite imagery for the entire county
-2. Tiling into overlapping patches
-3. Running inference on each patch
-4. Stitching results into a single GeoTIFF
+Generates wall-to-wall (spatially complete) monthly LFMC maps by:
+1. Downloading satellite imagery for Maui County from GEE
+2. Tiling into overlapping 32x32 pixel patches (320m x 320m)
+3. Running the trained Galileo-LFMC model on each patch
+4. Stitching results into a single GeoTIFF at 10m resolution
 
-Output: Monthly GeoTIFF files with LFMC values (0-200%)
+The trained model is applied zero-shot to Hawaii — it was trained on CONUS
+data but generalizes to Maui via the Galileo foundation model's pretrained
+representations. This is the same approach used by Johnson et al. (2025)
+for the LA Palisades/Eaton fire case studies.
 
 Usage:
-    python -m src.inference.map_generator \
-        --config configs/inference.yaml \
-        --year 2023 \
-        --month 8
+    # Generate map for August 2023 (month of Lahaina fire)
+    python -m src.inference.map_generator \\
+        --checkpoint checkpoints/conus/finetuned_model.pth \\
+        --galileo-config path/to/galileo-data \\
+        --year 2023 --month 8 \\
+        --project ace-shine-392702 \\
+        --output outputs/maps/
+
+    # Generate all months for 2023
+    python -m src.inference.map_generator \\
+        --checkpoint checkpoints/conus/finetuned_model.pth \\
+        --galileo-config path/to/galileo-data \\
+        --year 2023 --all-months \\
+        --project ace-shine-392702 \\
+        --output outputs/maps/
 """
 
 import argparse
 import logging
-import time
-from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
-from typing import Tuple
 
 import numpy as np
+import torch
 
-logger = logging.getLogger("map_generator")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
+logger = logging.getLogger(__name__)
 
-
-# Maui County geographic bounds
+# Maui County geographic bounds (WGS84)
 MAUI_BOUNDS = {
-    "lat_min": 20.5,
-    "lat_max": 21.1,
-    "lon_min": -156.7,
-    "lon_max": -155.9,
+    "min_lat": 20.5,
+    "max_lat": 21.1,
+    "min_lon": -156.7,
+    "max_lon": -155.9,
 }
 
-# UTM Zone 4N for Hawaii
-MAUI_CRS = "EPSG:32604"
-PIXEL_SIZE_M = 10  # 10 meter resolution
+MAUI_CRS = "EPSG:4326"
+PIXEL_SIZE_M = 10
 
 
-@dataclass
-class MapConfig:
-    """Configuration for map generation."""
-    checkpoint_path: str        # Path to trained model checkpoint
-    output_dir: str = "outputs/maps"
-    patch_size: int = 256       # Pixels per patch side
-    overlap: int = 32           # Overlap between patches (pixels)
-    batch_size: int = 16        # Patches per GPU batch
-    nodata_value: float = -9999.0
+def load_finetuned_model(
+    checkpoint_path: Path,
+    galileo_config_dir: Path,
+):
+    """Load the fine-tuned FineTuningModel from a checkpoint."""
+    import json
 
-
-def compute_grid_tiles(
-    bounds: dict,
-    patch_size: int,
-    overlap: int,
-    pixel_size_m: float = 10.0,
-) -> list[dict]:
-    """
-    Compute a grid of overlapping tiles covering the study area.
-
-    Each tile is a dict with lat/lon bounds that will be downloaded
-    and fed through the model.
-
-    Args:
-        bounds: Geographic bounds (lat_min, lat_max, lon_min, lon_max)
-        patch_size: Size of each tile in pixels
-        overlap: Overlap between adjacent tiles in pixels
-        pixel_size_m: Ground resolution in meters
-
-    Returns:
-        List of tile dicts with bounds and pixel coordinates
-    """
-    start = time.time()
-
-    # Convert pixel sizes to approximate degrees
-    # At Maui's latitude (~20.8N), 1 degree lat ~ 111km, 1 degree lon ~ 104km
-    lat_deg_per_pixel = pixel_size_m / 111000.0
-    lon_deg_per_pixel = pixel_size_m / 104000.0
-
-    patch_lat = patch_size * lat_deg_per_pixel
-    patch_lon = patch_size * lon_deg_per_pixel
-    step_lat = (patch_size - overlap) * lat_deg_per_pixel
-    step_lon = (patch_size - overlap) * lon_deg_per_pixel
-
-    tiles = []
-    lat = bounds["lat_min"]
-    row = 0
-    while lat < bounds["lat_max"]:
-        lon = bounds["lon_min"]
-        col = 0
-        while lon < bounds["lon_max"]:
-            tiles.append({
-                "lat_min": lat,
-                "lat_max": min(lat + patch_lat, bounds["lat_max"]),
-                "lon_min": lon,
-                "lon_max": min(lon + patch_lon, bounds["lon_max"]),
-                "row": row,
-                "col": col,
-            })
-            lon += step_lon
-            col += 1
-        lat += step_lat
-        row += 1
-
-    elapsed = time.time() - start
-    logger.info(f"OUTPUT | Grid: {row} rows x {col} cols = {len(tiles)} tiles")
-    logger.info(f"TIMING | Grid computation: {elapsed:.3f}s")
-    return tiles
-
-
-def predict_tile(model, tile_data, device) -> np.ndarray:
-    """
-    Run LFMC prediction on a single tile of satellite imagery.
-
-    Args:
-        model: Trained GalileoLFMC model
-        tile_data: Preprocessed satellite data for the tile
-        device: torch device
-
-    Returns:
-        LFMC predictions array [H, W]
-    """
     import torch
+    from galileo.galileo import Encoder
+    from galileo.utils import device
+    from lfmc.core.finetuning import FineTuningModel
+    import torch.nn as nn
 
+    # Load encoder config
+    config_path = galileo_config_dir / "models" / "tiny" / "config.json"
+    with config_path.open("r") as f:
+        config = json.load(f)
+    encoder = Encoder(**config["model"]["encoder"])
+
+    head = nn.Linear(encoder.embedding_size, 1)
+    model = FineTuningModel(encoder, head).to(device)
+
+    state_dict = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(state_dict)
     model.eval()
-    with torch.no_grad():
-        # tile_data should already be formatted as Galileo input
-        if isinstance(tile_data, np.ndarray):
-            tile_data = torch.from_numpy(tile_data).unsqueeze(0).to(device)
 
-        predictions = model(tile_data)
-        return predictions.squeeze().cpu().numpy()
+    logger.info("Loaded model from %s", checkpoint_path)
+    return model, device
 
 
-def stitch_tiles(
-    predictions: list[Tuple[dict, np.ndarray]],
-    bounds: dict,
-    pixel_size_m: float = 10.0,
-    nodata: float = -9999.0,
-) -> Tuple[np.ndarray, dict]:
+def generate_monthly_map(
+    year: int,
+    month: int,
+    checkpoint_path: Path,
+    galileo_config_dir: Path,
+    gee_project: str,
+    output_dir: Path,
+    patch_hw: int = 32,
+    patch_overlap: int = 4,
+) -> Path:
     """
-    Stitch predicted tiles into a single continuous map.
+    Generate a wall-to-wall LFMC map for Maui County for a given month.
 
-    For overlapping regions, takes the average of predictions.
-    This reduces edge artifacts between tiles.
+    Strategy:
+    - Download 12-month satellite composite ending in the target month from GEE
+    - Tile Maui into overlapping 32x32 pixel patches (320m x 320m at 10m)
+    - Run model inference on each patch
+    - Stitch with overlap averaging to remove edge artifacts
+    - Save as GeoTIFF
+
+    Args:
+        year: Target year
+        month: Target month (1-12)
+        checkpoint_path: Path to finetuned_model.pth
+        galileo_config_dir: Path to galileo-data directory
+        gee_project: GEE project ID
+        output_dir: Where to save output GeoTIFF
+        patch_hw: Patch height/width in pixels (default 32 = 320m)
+        patch_overlap: Overlap between patches in pixels
 
     Returns:
-        (lfmc_map, transform_info) tuple
+        Path to saved GeoTIFF
     """
-    start = time.time()
+    import ee
+    import rasterio
+    from rasterio.transform import from_bounds
 
-    lat_deg_per_pixel = pixel_size_m / 111000.0
-    lon_deg_per_pixel = pixel_size_m / 104000.0
+    from galileo.data.config import NORMALIZATION_DICT_FILENAME
+    from galileo.data.dataset import Dataset, Normalizer
+    from galileo.data.earthengine.eo import create_ee_image
+    from galileo.utils import masked_output_np_to_tensor
+    from lfmc.core.finetuning import FineTuningModel
 
-    # Compute output raster dimensions
-    height = int(np.ceil((bounds["lat_max"] - bounds["lat_min"]) / lat_deg_per_pixel))
-    width = int(np.ceil((bounds["lon_max"] - bounds["lon_min"]) / lon_deg_per_pixel))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"lfmc_maui_{year}_{month:02d}.tif"
 
-    # Accumulator and count arrays for averaging overlaps
-    lfmc_sum = np.zeros((height, width), dtype=np.float64)
-    count = np.zeros((height, width), dtype=np.float64)
+    if output_path.exists():
+        logger.info("Map already exists: %s", output_path)
+        return output_path
 
-    for tile_info, pred in predictions:
-        # Compute pixel coordinates for this tile
-        row_start = int((tile_info["lat_min"] - bounds["lat_min"]) / lat_deg_per_pixel)
-        col_start = int((tile_info["lon_min"] - bounds["lon_min"]) / lon_deg_per_pixel)
+    # Initialize GEE
+    ee.Initialize(project=gee_project)
 
-        h, w = pred.shape
-        row_end = min(row_start + h, height)
-        col_end = min(col_start + w, width)
-        h_clip = row_end - row_start
-        w_clip = col_end - col_start
+    # Load model
+    model, device = load_finetuned_model(checkpoint_path, galileo_config_dir)
 
-        lfmc_sum[row_start:row_end, col_start:col_end] += pred[:h_clip, :w_clip]
-        count[row_start:row_end, col_start:col_end] += 1.0
+    # Load normalizer
+    norm_path = galileo_config_dir / NORMALIZATION_DICT_FILENAME
+    normalizing_dicts = Dataset.load_normalization_values(norm_path)
+    normalizer = Normalizer(std=True, normalizing_dicts=normalizing_dicts)
 
-    # Average where we have predictions, nodata elsewhere
-    lfmc_map = np.where(count > 0, lfmc_sum / count, nodata).astype(np.float32)
+    # Compute 12-month window ending at target month
+    end_date = date(year, month, 28)  # last ~day of target month
+    from datetime import timedelta
+    import calendar
+    last_day = calendar.monthrange(year, month)[1]
+    end_date = date(year, month, last_day)
+    start_date = date(end_date.year - 1, end_date.month, 1)
 
-    # Flip vertically because raster convention is top-down
-    lfmc_map = np.flipud(lfmc_map)
+    logger.info(
+        "Generating LFMC map for %d-%02d (data window: %s to %s)",
+        year, month, start_date, end_date
+    )
 
-    transform_info = {
-        "width": width,
-        "height": height,
-        "lat_min": bounds["lat_min"],
-        "lat_max": bounds["lat_max"],
-        "lon_min": bounds["lon_min"],
-        "lon_max": bounds["lon_max"],
-        "pixel_size_m": pixel_size_m,
-        "crs": MAUI_CRS,
-    }
+    # Compute grid of tiles covering Maui
+    tiles = _compute_tile_grid(MAUI_BOUNDS, patch_hw, patch_overlap)
+    logger.info("Tiling Maui into %d patches (%dx%d px each)", len(tiles), patch_hw, patch_hw)
 
-    elapsed = time.time() - start
-    logger.info(f"OUTPUT | Stitched map: {height}x{width} pixels")
-    logger.info(f"TIMING | Stitching: {elapsed:.3f}s")
-    return lfmc_map, transform_info
+    # Build output raster dimensions
+    lat_range = MAUI_BOUNDS["max_lat"] - MAUI_BOUNDS["min_lat"]
+    lon_range = MAUI_BOUNDS["max_lon"] - MAUI_BOUNDS["min_lon"]
+    # ~111km per degree lat, ~104km per degree lon at Maui's latitude
+    height_px = int(lat_range * 111000 / PIXEL_SIZE_M)
+    width_px = int(lon_range * 104000 / PIXEL_SIZE_M)
 
+    lfmc_sum = np.zeros((height_px, width_px), dtype=np.float64)
+    count = np.zeros((height_px, width_px), dtype=np.float64)
 
-def save_geotiff(
-    lfmc_map: np.ndarray,
-    transform_info: dict,
-    output_path: str,
-    nodata: float = -9999.0,
-) -> None:
-    """
-    Save LFMC map as a GeoTIFF file.
+    n_success = 0
+    n_failed = 0
 
-    Requires rasterio. The output GeoTIFF includes:
-    - Proper CRS (UTM Zone 4N)
-    - Geotransform for georeferencing
-    - NoData value for ocean/invalid pixels
-    """
-    try:
-        import rasterio
-        from rasterio.transform import from_bounds
-    except ImportError:
-        logger.error("Install rasterio: pip install rasterio")
-        # Fallback: save as numpy
-        np.save(output_path.replace(".tif", ".npy"), lfmc_map)
-        logger.info(f"OUTPUT | Saved as numpy: {output_path.replace('.tif', '.npy')}")
-        return
+    for i, tile in enumerate(tiles):
+        if (i + 1) % 50 == 0:
+            logger.info("Processing tile %d/%d (%d ok, %d failed)", i + 1, len(tiles), n_success, n_failed)
 
-    height, width = lfmc_map.shape
+        try:
+            pred = _predict_tile(
+                tile=tile,
+                start_date=start_date,
+                end_date=end_date,
+                model=model,
+                normalizer=normalizer,
+                device=device,
+                patch_hw=patch_hw,
+                gee_project=gee_project,
+            )
+
+            # Place prediction in output raster
+            row_start = int((tile["min_lat"] - MAUI_BOUNDS["min_lat"]) / (PIXEL_SIZE_M / 111000))
+            col_start = int((tile["min_lon"] - MAUI_BOUNDS["min_lon"]) / (PIXEL_SIZE_M / 104000))
+            row_end = min(row_start + patch_hw, height_px)
+            col_end = min(col_start + patch_hw, width_px)
+            h = row_end - row_start
+            w = col_end - col_start
+
+            lfmc_sum[row_start:row_end, col_start:col_end] += pred[:h, :w]
+            count[row_start:row_end, col_start:col_end] += 1.0
+            n_success += 1
+
+        except Exception as e:
+            logger.debug("Tile %d failed: %s", i, e)
+            n_failed += 1
+
+    logger.info(
+        "Inference complete: %d/%d tiles successful", n_success, n_success + n_failed
+    )
+
+    # Average overlapping predictions
+    lfmc_map = np.where(count > 0, lfmc_sum / count, -9999.0).astype(np.float32)
+    lfmc_map = np.flipud(lfmc_map)  # Raster convention: top-down
+
+    # Save GeoTIFF
     transform = from_bounds(
-        transform_info["lon_min"],
-        transform_info["lat_min"],
-        transform_info["lon_max"],
-        transform_info["lat_max"],
-        width,
-        height,
+        MAUI_BOUNDS["min_lon"], MAUI_BOUNDS["min_lat"],
+        MAUI_BOUNDS["max_lon"], MAUI_BOUNDS["max_lat"],
+        width_px, height_px,
     )
 
     with rasterio.open(
-        output_path,
-        "w",
+        output_path, "w",
         driver="GTiff",
-        height=height,
-        width=width,
+        height=height_px,
+        width=width_px,
         count=1,
         dtype=np.float32,
-        crs=transform_info["crs"],
+        crs=MAUI_CRS,
         transform=transform,
-        nodata=nodata,
+        nodata=-9999.0,
         compress="lzw",
     ) as dst:
         dst.write(lfmc_map, 1)
         dst.update_tags(
-            description="Live Fuel Moisture Content (LFMC) prediction",
-            units="percent",
-            model="Galileo-Tiny fine-tuned on Globe-LFMC 2.0",
+            description="Live Fuel Moisture Content (LFMC)",
+            units="percent (0-302)",
+            year=str(year),
+            month=str(month),
+            model="Galileo-Tiny fine-tuned on Globe-LFMC 2.0 CONUS",
+            reference="Johnson et al. 2025, arXiv:2506.20132",
         )
 
-    logger.info(f"OUTPUT | Saved GeoTIFF: {output_path}")
-
-
-def generate_monthly_map(
-    model,
-    year: int,
-    month: int,
-    config: MapConfig,
-    device=None,
-) -> str:
-    """
-    Generate a complete LFMC map for one month.
-
-    This is the main entry point for map generation.
-
-    Args:
-        model: Trained GalileoLFMC model
-        year: Target year (e.g., 2023)
-        month: Target month (1-12)
-        config: Map generation configuration
-        device: torch device
-
-    Returns:
-        Path to the saved GeoTIFF file
-    """
-    import torch
-
-    start = time.time()
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    logger.info("=" * 60)
-    logger.info(f"Generating LFMC map for {year}-{month:02d}")
-    logger.info("=" * 60)
-
-    # Step 1: Compute tile grid
-    tiles = compute_grid_tiles(MAUI_BOUNDS, config.patch_size, config.overlap)
-
-    # Step 2: Download satellite imagery for each tile
-    # (This would call sentinel_download functions)
-    logger.info("STATUS | Downloading satellite imagery for tiles...")
-    logger.info("STATUS | (This step requires satellite data access)")
-
-    # Step 3: Run predictions
-    predictions = []
-    for i, tile in enumerate(tiles):
-        if (i + 1) % 50 == 0:
-            logger.info(f"STATUS | Processing tile {i+1}/{len(tiles)}")
-
-        # TODO: Load actual satellite data for this tile
-        # For now, create placeholder
-        # In production: tile_data = download_and_preprocess_tile(tile, year, month)
-        fake_pred = np.random.uniform(50, 150, (config.patch_size, config.patch_size))
-        predictions.append((tile, fake_pred.astype(np.float32)))
-
-    # Step 4: Stitch tiles
-    lfmc_map, transform_info = stitch_tiles(predictions, MAUI_BOUNDS, nodata=config.nodata_value)
-
-    # Step 5: Save
-    output_dir = Path(config.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = str(output_dir / f"lfmc_maui_{year}_{month:02d}.tif")
-    save_geotiff(lfmc_map, transform_info, output_path, config.nodata_value)
-
-    elapsed = time.time() - start
-    logger.info(f"TIMING | Map generation: {elapsed:.1f}s")
+    logger.info("Saved LFMC map: %s", output_path)
     return output_path
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate LFMC maps")
-    parser.add_argument("--checkpoint", required=True, help="Model checkpoint path")
-    parser.add_argument("--year", type=int, required=True)
-    parser.add_argument("--month", type=int, required=True)
-    parser.add_argument("--output-dir", default="outputs/maps")
-    args = parser.parse_args()
+def _compute_tile_grid(bounds: dict, patch_hw: int, overlap: int) -> list[dict]:
+    """Compute overlapping tile grid covering the bounds."""
+    # Degrees per pixel at Maui's latitude
+    lat_per_px = PIXEL_SIZE_M / 111000.0
+    lon_per_px = PIXEL_SIZE_M / 104000.0
 
-    config = MapConfig(
-        checkpoint_path=args.checkpoint,
-        output_dir=args.output_dir,
+    patch_lat = patch_hw * lat_per_px
+    patch_lon = patch_hw * lon_per_px
+    step_lat = (patch_hw - overlap) * lat_per_px
+    step_lon = (patch_hw - overlap) * lon_per_px
+
+    tiles = []
+    lat = bounds["min_lat"]
+    while lat < bounds["max_lat"]:
+        lon = bounds["min_lon"]
+        while lon < bounds["max_lon"]:
+            tiles.append({
+                "min_lat": lat,
+                "max_lat": min(lat + patch_lat, bounds["max_lat"]),
+                "min_lon": lon,
+                "max_lon": min(lon + patch_lon, bounds["max_lon"]),
+            })
+            lon += step_lon
+        lat += step_lat
+
+    return tiles
+
+
+def _predict_tile(
+    tile: dict,
+    start_date: date,
+    end_date: date,
+    model,
+    normalizer,
+    device,
+    patch_hw: int,
+    gee_project: str,
+) -> np.ndarray:
+    """Download satellite data for a tile and run model inference."""
+    import shutil
+    import tempfile
+
+    import ee
+    import requests
+    import rioxarray
+
+    from galileo.data.dataset import Dataset
+    from galileo.data.earthengine.eo import create_ee_image
+    from galileo.utils import masked_output_np_to_tensor
+    from lfmc.core.finetuning import FineTuningModel
+
+    polygon = ee.Geometry.Rectangle([
+        tile["min_lon"], tile["min_lat"],
+        tile["max_lon"], tile["max_lat"],
+    ])
+
+    img = create_ee_image(polygon, start_date, end_date)
+    url = img.getDownloadURL({
+        "region": polygon,
+        "scale": PIXEL_SIZE_M,
+        "filePerBand": False,
+        "format": "GEO_TIFF",
+    })
+
+    r = requests.get(url, stream=True, timeout=120)
+    r.raise_for_status()
+
+    with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as f:
+        shutil.copyfileobj(r.raw, f)
+        tmp_path = Path(f.name)
+
+    try:
+        # Parse TIF using Galileo's dataset loader
+        dataset = Dataset.__new__(Dataset)
+        dataset.output_hw = patch_hw
+        dataset.output_timesteps = 12
+        dataset.h5py_folder = None
+
+        # Use month array based on start month
+        import types
+        def _month_array(self, tif_path, num_timesteps):
+            return np.fmod(np.arange(start_date.month - 1, start_date.month - 1 + num_timesteps), 12)
+        dataset.month_array_from_file = types.MethodType(_month_array, dataset)
+
+        dataset_output = dataset._tif_to_array(tmp_path).normalize(normalizer)
+        s_t_x, sp_x, t_x, st_x, months = dataset_output
+
+        # Subset to patch_hw x patch_hw
+        from galileo.data.dataset import Dataset as D
+        s_t_x, sp_x, t_x, st_x, months = D.subset_image(
+            s_t_x, sp_x, t_x, st_x, months,
+            size=patch_hw, num_timesteps=12
+        )
+
+        # Make masks (all zeros = include everything)
+        from galileo.data.dataset import (
+            SPACE_BAND_GROUPS_IDX, SPACE_TIME_BANDS_GROUPS_IDX,
+            STATIC_BAND_GROUPS_IDX, TIME_BAND_GROUPS_IDX,
+        )
+        s_t_m = np.zeros([patch_hw, patch_hw, 12, len(SPACE_TIME_BANDS_GROUPS_IDX)])
+        sp_m = np.zeros([patch_hw, patch_hw, len(SPACE_BAND_GROUPS_IDX)])
+        t_m = np.zeros([12, len(TIME_BAND_GROUPS_IDX)])
+        st_m = np.zeros([len(STATIC_BAND_GROUPS_IDX)])
+
+        tensors = masked_output_np_to_tensor(s_t_x, sp_x, t_x, st_x, s_t_m, sp_m, t_m, st_m, months)
+        tensors = [t.unsqueeze(0).to(device) for t in tensors]
+
+        s_t_x_t, sp_x_t, t_x_t, st_x_t, s_t_m_t, sp_m_t, t_m_t, st_m_t, months_t = tensors
+
+        with torch.no_grad():
+            pred = model(s_t_x_t, sp_x_t, t_x_t, st_x_t,
+                         s_t_m_t, sp_m_t, t_m_t, st_m_t, months_t)
+            # pred is [1, 1] normalized 0-1, scale to LFMC %
+            lfmc_value = pred[0, 0].item() * 302.0
+
+        return np.full((patch_hw, patch_hw), lfmc_value, dtype=np.float32)
+
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def main():
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        level=logging.INFO,
     )
 
-    # NOTE: Load your trained model here
-    # model = load_trained_model(args.checkpoint)
-    print(f"Map generation configured for {args.year}-{args.month:02d}")
-    print(f"Output dir: {args.output_dir}")
-    print("Load your trained model and call generate_monthly_map()")
+    parser = argparse.ArgumentParser(
+        description="Generate monthly LFMC maps for Maui County"
+    )
+    parser.add_argument("--checkpoint", type=Path, required=True,
+                        help="Path to finetuned_model.pth")
+    parser.add_argument("--galileo-config", type=Path, required=True,
+                        help="Path to galileo-data directory")
+    parser.add_argument("--project", required=True,
+                        help="GEE project ID")
+    parser.add_argument("--year", type=int, required=True)
+    parser.add_argument("--month", type=int, default=None,
+                        help="Month (1-12). Omit with --all-months for full year.")
+    parser.add_argument("--all-months", action="store_true",
+                        help="Generate all 12 months for the given year")
+    parser.add_argument("--output", type=Path, default=Path("outputs/maps"))
+
+    args = parser.parse_args()
+
+    months = list(range(1, 13)) if args.all_months else [args.month]
+
+    for month in months:
+        output_path = generate_monthly_map(
+            year=args.year,
+            month=month,
+            checkpoint_path=args.checkpoint,
+            galileo_config_dir=args.galileo_config,
+            gee_project=args.project,
+            output_dir=args.output,
+        )
+        logger.info("Generated: %s", output_path)
+
+
+if __name__ == "__main__":
+    main()

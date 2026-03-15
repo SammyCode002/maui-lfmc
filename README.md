@@ -2,79 +2,183 @@
 
 ## Project Overview
 
-This project creates high-resolution maps of Live Fuel Moisture Content (LFMC)
-for Maui County, Hawaii, using the Galileo foundation model fine-tuned on satellite
-remote sensing data. LFMC measures the water content in living vegetation as a
-percentage, and is a critical factor in wildfire risk assessment.
+This project generates high-resolution monthly maps of Live Fuel Moisture Content (LFMC)
+for Maui County, Hawaii. LFMC measures water content in living vegetation as a percentage —
+below 80% indicates critical wildfire danger. The 2023 Lahaina fire, which killed 100+ people,
+occurred when vegetation was critically dry.
 
-The 2023 Lahaina wildfire demonstrated the devastating impact of dry vegetation
-conditions. This project provides monthly LFMC maps that could support wildfire
-risk assessment and prevention efforts.
+We reproduce Johnson et al. (2025) by fine-tuning the Galileo-Tiny foundation model on
+CONUS Globe-LFMC data, then apply the trained model **zero-shot to Maui** (the same
+approach used for the 2025 LA Palisades/Eaton fire case studies in that paper). There are
+no Hawaii samples in Globe-LFMC 2.0 — the contribution of this project is generating and
+analyzing pre/post-Lahaina LFMC maps using Galileo's learned representations.
 
 ## Key References
 
 | Resource | Link |
 |----------|------|
 | Johnson et al. (2025) paper | https://arxiv.org/abs/2506.20132 |
-| Galileo model (Tseng et al. 2025) | https://arxiv.org/abs/2502.09356 |
-| Galileo code + weights | https://github.com/nasaharvest/galileo |
-| AllenAI OlmoEarth LFMC pipeline | https://github.com/allenai/olmoearth_projects |
+| Official AllenAI LFMC pipeline | https://github.com/allenai/lfmc |
+| Galileo foundation model | https://github.com/nasaharvest/galileo |
+| Galileo weights (HuggingFace) | https://huggingface.co/nasaharvest/galileo |
 | Globe-LFMC 2.0 dataset | https://doi.org/10.1038/s41597-024-03159-6 |
 | Globe-LFMC 2.0 data (figshare) | https://doi.org/10.6084/m9.figshare.24312164 |
-| Galileo weights (HuggingFace) | https://huggingface.co/nasaharvest/galileo |
 
 ## Architecture
 
-The pipeline has three stages:
+### Model
+- **Galileo-Tiny**: 5.3M parameter Vision Transformer pretrained on multimodal satellite data
+- **Regression head**: Single linear layer mapping encoder embedding → LFMC %
+- **Training**: Fine-tuned on Globe-LFMC 2.0 CONUS subset (41,214 samples, 1,031 sites)
+- **Target performance**: RMSE ≈ 18.9, R² ≈ 0.72 (Johnson et al. 2025 Table 1)
 
-**Data Pipeline:** Globe-LFMC 2.0 labels are filtered to Hawaii. Sentinel-2
-optical imagery and Sentinel-1 SAR data are downloaded for each sample location,
-producing 12-month temporal stacks formatted as Galileo input tensors.
+### Data (all from Google Earth Engine)
+Each sample = one 1km × 1km GeoTIFF with 12 monthly composites of:
+- Sentinel-2 L1C (10 bands, optical/NDVI)
+- Sentinel-1 (VV, VH SAR backscatter)
+- ERA5-Land (temperature, precipitation, ET)
+- TerraClimate (climate water balance)
+- VIIRS (night lights)
+- SRTM (elevation, slope)
+- DynamicWorld + WorldCereal (land cover)
+- LandScan (population, static)
 
-**Model Pipeline:** A pretrained Galileo-Tiny encoder (5.3M params, Vision
-Transformer) is loaded from HuggingFace. An LFMC regression head is attached
-and the model is fine-tuned first on CONUS data (validation), then on Hawaii
-data (or used via transfer learning if Hawaii samples are sparse).
+### Inference
+Maui County (20.5°–21.1°N, 156.7°–155.9°W) is tiled into overlapping 32×32 pixel patches
+(320m × 320m at 10m resolution), processed by the CONUS-trained model, then stitched
+into a wall-to-wall GeoTIFF via overlap averaging to remove edge artifacts.
 
-**Output Pipeline:** For each month, satellite imagery covering all of Maui
-County is tiled into overlapping patches, run through the model, and stitched
-into a single GeoTIFF at 10m resolution.
+## Repository Structure
+
+```
+maui-lfmc/
+├── src/
+│   ├── data/
+│   │   └── download_tifs.py      # GEE satellite download (training + inference)
+│   ├── model/
+│   │   └── train.py              # Fine-tune Galileo on Globe-LFMC (wraps allenai/lfmc)
+│   └── inference/
+│       └── map_generator.py      # Generate monthly LFMC maps for Maui County
+├── requirements.txt
+└── README.md
+```
 
 ## Setup
 
-    git clone https://github.com/SammyCode002/maui-lfmc.git
-    cd maui-lfmc
-    python -m venv venv
-    source venv/bin/activate
-    pip install -r requirements.txt
+### 1. Install conda environment
 
-    # Download Galileo model weights
-    pip install huggingface_hub
-    huggingface-cli download nasaharvest/galileo --include "models/**" --local-dir data/galileo
+```bash
+conda create -n lfmc python=3.11
+conda activate lfmc
+conda install -c conda-forge gdal rasterio geopandas
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install -r requirements.txt
+```
 
-## Quick Start
+### 2. Clone and install Galileo + AllenAI LFMC
 
-    # Step 1: Filter Globe-LFMC data to Hawaii
-    python -m src.data.globe_lfmc_filter --input data/raw/Globe-LFMC-2.0.xlsx --output data/processed/ --region maui
+```bash
+git clone --recurse-submodules https://github.com/allenai/lfmc.git allenai-lfmc
+pip install -e allenai-lfmc/submodules/galileo
+pip install -e allenai-lfmc
+```
 
-    # Step 2: Download satellite imagery
-    python -m src.data.sentinel_download --sites data/processed/globe_lfmc_conus_west.csv --output data/satellite/
+### 3. Download Galileo weights
 
-    # Step 3: Train on CONUS data (validation)
-    python -m src.model.training --config configs/conus_finetune.yaml
+```bash
+git clone https://huggingface.co/nasaharvest/galileo galileo-data
+```
 
-    # Step 4: Fine-tune for Maui
-    python -m src.model.training --config configs/maui_finetune.yaml
+### 4. Authenticate Google Earth Engine
 
-    # Step 5: Generate LFMC maps
-    python -m src.inference.map_generator --checkpoint checkpoints/maui/best_model.pt --year 2023 --month 8
+```bash
+earthengine authenticate
+```
 
-## Timeline (8-10 weeks)
+### 5. Get Globe-LFMC 2.0 labels
 
-| Week | Phase | Deliverable |
-|------|-------|-------------|
-| 1-2 | Literature review + architecture | This repo, architecture doc |
-| 3 | Data preparation | Filtered Globe-LFMC, satellite downloads |
-| 4-5 | CONUS validation | Reproduced Johnson et al. baseline |
-| 6-7 | Maui fine-tuning | Trained Maui-specific model |
-| 8-10 | Map generation + analysis | Monthly LFMC maps 2023-2026 |
+Download `Globe-LFMC-2.0.xlsx` from https://doi.org/10.6084/m9.figshare.24312164,
+then run:
+
+```bash
+cd allenai-lfmc
+python -m lfmc.main.create_csv
+```
+
+This creates `data/labels/lfmc_data_conus.csv` (~90K CONUS samples).
+
+## Usage
+
+### Step 1: Download training data (overnight, ~90K TIFs)
+
+```bash
+# Small test batch first (recommended)
+python -m src.data.download_tifs \
+    --labels allenai-lfmc/data/labels/lfmc_data_conus.csv \
+    --output data/tifs/ \
+    --project YOUR_GEE_PROJECT \
+    --limit 100
+
+# Full dataset (runs overnight)
+python -m src.data.download_tifs \
+    --labels allenai-lfmc/data/labels/lfmc_data_conus.csv \
+    --output data/tifs/ \
+    --project YOUR_GEE_PROJECT
+```
+
+### Step 2: Train CONUS model
+
+```bash
+python -m src.model.train \
+    --galileo-config-dir galileo-data \
+    --data-dir data/tifs/ \
+    --h5py-dir data/h5pys/ \
+    --labels allenai-lfmc/data/labels/lfmc_data_conus.csv \
+    --output checkpoints/conus/
+```
+
+Target: RMSE ≈ 18.9, R² ≈ 0.72.
+
+### Step 3: Generate Maui LFMC maps
+
+```bash
+# August 2023 (month of Lahaina fire)
+python -m src.inference.map_generator \
+    --checkpoint checkpoints/conus/finetuned_model.pth \
+    --galileo-config galileo-data \
+    --year 2023 --month 8 \
+    --project YOUR_GEE_PROJECT \
+    --output outputs/maps/
+
+# All months for 2023
+python -m src.inference.map_generator \
+    --checkpoint checkpoints/conus/finetuned_model.pth \
+    --galileo-config galileo-data \
+    --year 2023 --all-months \
+    --project YOUR_GEE_PROJECT \
+    --output outputs/maps/
+```
+
+Output: `outputs/maps/lfmc_maui_2023_08.tif` — a GeoTIFF at 10m resolution covering
+all of Maui County, with LFMC values in % (nodata = -9999).
+
+## Scientific Rationale
+
+Globe-LFMC 2.0 contains **zero samples from Hawaii**. Rather than attempting to train
+on Hawaii data (which doesn't exist), we follow Johnson et al.'s zero-shot transfer
+approach: train on CONUS, apply to new geography using Galileo's pretrained
+multi-modal representations. This worked for the 2025 LA fires and is appropriate for
+Maui since the vegetation types (chaparral-adjacent dry shrubland) and fire dynamics
+are similar to fire-prone CONUS regions.
+
+The key scientific contribution is the **temporal analysis**: comparing LFMC maps from
+months leading up to August 8, 2023 to understand how vegetation drought developed
+before the Lahaina fire.
+
+## Acknowledgments
+
+This project is conducted as part of a NASA Harvest internship.
+It builds directly on:
+- Johnson et al. (2025) — LFMC methodology and Galileo application
+- Tseng et al. (2025) — Galileo foundation model
+- Rao et al. (2020) — Globe-LFMC 2.0 dataset
