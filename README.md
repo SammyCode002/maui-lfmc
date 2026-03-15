@@ -137,11 +137,15 @@ Target: RMSE ≈ 18.9, R² ≈ 0.72.
 
 ### Step 3: Generate Maui LFMC maps
 
+> **Note:** `allenai-lfmc` is a separate repo cloned alongside this one.
+> Use the absolute path to `allenai-lfmc/submodules/galileo/data` — relative
+> paths can fail depending on working directory.
+
 ```bash
 # August 2023 (month of Lahaina fire)
 python -m src.inference.map_generator \
     --checkpoint checkpoints/conus/finetuned_model.pth \
-    --galileo-config allenai-lfmc/submodules/galileo/data \
+    --galileo-config /path/to/allenai-lfmc/submodules/galileo/data \
     --year 2023 --month 8 \
     --project YOUR_GEE_PROJECT \
     --output outputs/maps/
@@ -149,7 +153,7 @@ python -m src.inference.map_generator \
 # All months for 2023
 python -m src.inference.map_generator \
     --checkpoint checkpoints/conus/finetuned_model.pth \
-    --galileo-config allenai-lfmc/submodules/galileo/data \
+    --galileo-config /path/to/allenai-lfmc/submodules/galileo/data \
     --year 2023 --all-months \
     --project YOUR_GEE_PROJECT \
     --output outputs/maps/
