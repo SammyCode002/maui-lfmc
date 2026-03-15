@@ -357,7 +357,8 @@ def _predict_tile(
 
         with torch.no_grad():
             pred = model(s_t_x_t, sp_x_t, t_x_t, st_x_t,
-                         s_t_m_t, sp_m_t, t_m_t, st_m_t, months_t)
+                         s_t_m_t, sp_m_t, t_m_t, st_m_t, months_t,
+                         patch_size=16, input_resolution_m=10)
             # pred is [1, 1] normalized 0-1, scale to LFMC %
             lfmc_value = pred[0, 0].item() * 302.0
 
