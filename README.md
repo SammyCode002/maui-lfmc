@@ -162,6 +162,14 @@ python -m src.inference.map_generator \
 Output: `outputs/maps/lfmc_maui_2023_08.tif` — a GeoTIFF at 10m resolution covering
 all of Maui County, with LFMC values in % (nodata = -9999).
 
+**August 2023 LFMC Map (month of Lahaina fire):**
+
+![August 2023 LFMC Map](outputs/plots/lfmc_maui_2023_08_v2.png)
+
+The orange/red zone in the central valley shows LFMC near or below the critical 80%
+fire danger threshold. The Lahaina fire origin (★) sits at the western coast where
+dry conditions met high wind exposure on August 8, 2023.
+
 ## Scientific Rationale
 
 Globe-LFMC 2.0 contains **zero samples from Hawaii**. Rather than attempting to train
