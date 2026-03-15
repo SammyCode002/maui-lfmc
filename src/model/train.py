@@ -38,8 +38,8 @@ def load_galileo_encoder(galileo_config_dir: Path, load_weights: bool = True):
     from galileo.galileo import Encoder
     from galileo.utils import device
 
-    config_path = galileo_config_dir / "models" / "tiny" / CONFIG_FILENAME
-    encoder_path = galileo_config_dir / "models" / "tiny" / ENCODER_FILENAME
+    config_path = galileo_config_dir / "models" / "nano" / CONFIG_FILENAME
+    encoder_path = galileo_config_dir / "models" / "nano" / ENCODER_FILENAME
 
     if not config_path.exists():
         raise FileNotFoundError(

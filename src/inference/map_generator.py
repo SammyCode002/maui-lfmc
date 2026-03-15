@@ -49,7 +49,7 @@ MAUI_BOUNDS = {
 }
 
 MAUI_CRS = "EPSG:4326"
-PIXEL_SIZE_M = 10
+PIXEL_SIZE_M = 100  # 100m resolution — stays under GEE's 48MB/tile download limit
 
 
 def load_finetuned_model(
@@ -66,7 +66,7 @@ def load_finetuned_model(
     import torch.nn as nn
 
     # Load encoder config
-    config_path = galileo_config_dir / "models" / "tiny" / "config.json"
+    config_path = galileo_config_dir / "models" / "nano" / "config.json"
     with config_path.open("r") as f:
         config = json.load(f)
     encoder = Encoder(**config["model"]["encoder"])
