@@ -1,5 +1,7 @@
 # Mapping Wildfire Risk in Maui County Using Live Fuel Moisture Content
 
+![Study Area](docs/study_area.png)
+
 ## Project Overview
 
 This project generates high-resolution monthly maps of Live Fuel Moisture Content (LFMC)
@@ -83,19 +85,13 @@ pip install -e allenai-lfmc/submodules/galileo
 pip install -e allenai-lfmc
 ```
 
-### 3. Download Galileo weights
-
-```bash
-git clone https://huggingface.co/nasaharvest/galileo galileo-data
-```
-
-### 4. Authenticate Google Earth Engine
+### 3. Authenticate Google Earth Engine
 
 ```bash
 earthengine authenticate
 ```
 
-### 5. Get Globe-LFMC 2.0 labels
+### 4. Get Globe-LFMC 2.0 labels
 
 Download `Globe-LFMC-2.0.xlsx` from https://doi.org/10.6084/m9.figshare.24312164,
 then run:
@@ -130,7 +126,7 @@ python -m src.data.download_tifs \
 
 ```bash
 python -m src.model.train \
-    --galileo-config-dir galileo-data \
+    --galileo-config-dir allenai-lfmc/submodules/galileo/data \
     --data-dir data/tifs/ \
     --h5py-dir data/h5pys/ \
     --labels allenai-lfmc/data/labels/lfmc_data_conus.csv \
@@ -145,7 +141,7 @@ Target: RMSE ≈ 18.9, R² ≈ 0.72.
 # August 2023 (month of Lahaina fire)
 python -m src.inference.map_generator \
     --checkpoint checkpoints/conus/finetuned_model.pth \
-    --galileo-config galileo-data \
+    --galileo-config allenai-lfmc/submodules/galileo/data \
     --year 2023 --month 8 \
     --project YOUR_GEE_PROJECT \
     --output outputs/maps/
@@ -153,7 +149,7 @@ python -m src.inference.map_generator \
 # All months for 2023
 python -m src.inference.map_generator \
     --checkpoint checkpoints/conus/finetuned_model.pth \
-    --galileo-config galileo-data \
+    --galileo-config allenai-lfmc/submodules/galileo/data \
     --year 2023 --all-months \
     --project YOUR_GEE_PROJECT \
     --output outputs/maps/
