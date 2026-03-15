@@ -9,25 +9,20 @@ GEE allows ~20 concurrent requests per project. Default is 10 workers to
 stay comfortably under the limit. Increase with --workers if your quota allows.
 
 Usage:
-    # Resume/start download from Globe-LFMC Excel (CONUS-West by default)
-    py -m src.data.parallel_download \
-        --project YOUR_GEE_PROJECT \
+    # Use pre-built labels CSV (fastest — skip Excel processing)
+    python -m src.data.parallel_download \
+        --project ace-shine-392702 \
+        --labels C:/Users/LazyB/Downloads/allenai-lfmc/data/labels/lfmc_data_conus.csv \
         --output data/tifs/ \
         --workers 10
 
     # Limit to a test batch
-    py -m src.data.parallel_download \
-        --project YOUR_GEE_PROJECT \
+    python -m src.data.parallel_download \
+        --project ace-shine-392702 \
+        --labels C:/path/to/lfmc_data_conus.csv \
         --output data/tifs/ \
         --workers 10 \
         --limit 500
-
-    # Different region
-    py -m src.data.parallel_download \
-        --project YOUR_GEE_PROJECT \
-        --output data/tifs/ \
-        --region conus \
-        --workers 16
 """
 
 import argparse
@@ -41,40 +36,22 @@ import pandas as pd
 from tqdm import tqdm
 
 from src.data.download_tifs import download_tif_for_sample, pad_dates
-from src.data.globe_lfmc_filter import (
-    load_globe_lfmc,
-    standardize_columns,
-    add_temporal_features,
-    filter_by_region,
-    REGION_BOUNDS,
-)
+from src.data.globe_lfmc_filter import REGION_BOUNDS
 
 logger = logging.getLogger(__name__)
 
-GLOBE_LFMC_EXCEL = Path("data/raw/Globe-LFMC-2.0.xlsx")
 
-
-def build_sample_list(region: str, limit: int | None = None) -> list[dict]:
+def build_sample_list(labels_csv: Path, limit: int | None = None) -> list[dict]:
     """
-    Load Globe-LFMC Excel, filter to region, deduplicate by lat/lon/date,
+    Load pre-built labels CSV, deduplicate by lat/lon/date,
     and return list of sample dicts ready for downloading.
     """
-    df = load_globe_lfmc(GLOBE_LFMC_EXCEL)
-    df = standardize_columns(df)
-    df = add_temporal_features(df)
-    df = filter_by_region(df, region)
-
-    # Match the dedup logic in download_tifs.py
-    if "sorting_id" not in df.columns:
-        id_col = [c for c in df.columns if "sorting" in c.lower() or c.lower() == "id"]
-        if id_col:
-            df = df.rename(columns={id_col[0]: "sorting_id"})
-        else:
-            df["sorting_id"] = df.index
+    df = pd.read_csv(labels_csv)
+    df["sampling_date"] = pd.to_datetime(df["sampling_date"])
 
     grouped = df.groupby(
         ["latitude", "longitude", "sampling_date"], as_index=False
-    ).agg({"sorting_id": "first"})
+    ).agg({"sorting_id": "first", "lfmc_value": "mean"})
 
     if limit is not None:
         grouped = grouped.head(limit)
@@ -114,7 +91,7 @@ def download_worker(sample: dict, output_dir: Path, project: str) -> tuple[int, 
 def run_parallel_download(
     project: str,
     output_dir: Path,
-    region: str = "conus_west",
+    labels_csv: Path,
     workers: int = 10,
     limit: int | None = None,
 ) -> None:
@@ -126,7 +103,7 @@ def run_parallel_download(
     already = len(list(output_dir.glob("*.tif")))
     logger.info("TIFs already on disk: %d", already)
 
-    samples = build_sample_list(region, limit)
+    samples = build_sample_list(labels_csv, limit)
     total = len(samples)
 
     downloaded = 0
@@ -189,12 +166,12 @@ def main():
     parser = argparse.ArgumentParser(description="Parallel GEE TIF downloader")
     parser.add_argument("--project", required=True, help="GEE project ID")
     parser.add_argument(
-        "--output", type=Path, default=Path("data/tifs/"),
-        help="Output directory (default: data/tifs/)"
+        "--labels", type=Path, required=True,
+        help="Path to labels CSV (e.g. allenai-lfmc/data/labels/lfmc_data_conus.csv)"
     )
     parser.add_argument(
-        "--region", default="conus_west", choices=list(REGION_BOUNDS.keys()),
-        help="Geographic region to download (default: conus_west)"
+        "--output", type=Path, default=Path("data/tifs/"),
+        help="Output directory (default: data/tifs/)"
     )
     parser.add_argument(
         "--workers", type=int, default=10,
@@ -209,7 +186,7 @@ def main():
     run_parallel_download(
         project=args.project,
         output_dir=args.output,
-        region=args.region,
+        labels_csv=args.labels,
         workers=args.workers,
         limit=args.limit,
     )
