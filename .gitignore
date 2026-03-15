@@ -48,5 +48,5 @@ logs/
 *.log
 wandb/
 
-# Outputs (generated maps are large)
-outputs/
+# Outputs — ignore large map TIFs, track plot PNGs
+outputs/maps/
