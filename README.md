@@ -170,6 +170,27 @@ The orange/red zone in the central valley shows LFMC near or below the critical 
 fire danger threshold. The Lahaina fire origin (★) sits at the western coast where
 dry conditions met high wind exposure on August 8, 2023.
 
+### Interactive Web Map
+
+Explore all monthly maps at: **[maui-lfmc-web.vercel.app](https://maui-lfmc-web.vercel.app)**
+
+Features:
+- Year/month selector (2021–2026 as maps are generated)
+- Click any pixel to see exact LFMC % and fire risk level
+- Lahaina fire origin marker with historical context
+
+### Multi-year August Comparison
+
+*(Figure generated once Aug 2021 / 2022 / 2024 maps complete)*
+
+<!-- aug_comparison figure will go here -->
+
+### Monthly Time Series 2023
+
+*(Figure generated once all 12 months complete)*
+
+<!-- timeseries_2023 figure will go here -->
+
 ## Scientific Rationale
 
 Globe-LFMC 2.0 contains **zero samples from Hawaii**. Rather than attempting to train
