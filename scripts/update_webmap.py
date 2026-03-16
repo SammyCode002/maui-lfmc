@@ -71,7 +71,7 @@ def main(webmap_dir, dry_run):
             if not dry_run:
                 webmap_data.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src_path, dst)
-            print(f"  [copy] {src_path.name} → {dst}")
+            print(f"  [copy] {src_path.name} -> {dst}")
 
     # Update AVAILABLE set in index.html
     html = index_html.read_text(encoding="utf-8")
